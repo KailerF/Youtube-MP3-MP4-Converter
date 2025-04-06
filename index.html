@@ -1,426 +1,254 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube to MP3/MP4 Converter</title>
-    <style>
-        :root {
-            --primary-color: #ff0000;
-            --secondary-color: #121212;
-            --text-color: #333;
-            --light-color: #f4f4f4;
-            --border-radius: 4px;
-            --box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-        }
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
+const ytdlp = require('yt-dlp-exec');
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: Arial, sans-serif;
-        }
+// Improved error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled Error:', err);
+  res.status(500).json({ 
+    error: 'Internal Server Error', 
+    message: err.message 
+  });
+});
 
-        body {
-            background-color: var(--light-color);
-            color: var(--text-color);
-            line-height: 1.6;
-            padding: 20px;
-        }
+// Create downloads directory if it doesn't exist
+const downloadsDir = path.join(__dirname, 'downloads');
+if (!fs.existsSync(downloadsDir)) {
+  fs.mkdirSync(downloadsDir);
+}
 
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: white;
-            padding: 30px;
-            border-radius: var(--border-radius);
-            box-shadow: var(--box-shadow);
-        }
+// Serve static files
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
 
-        header {
-            display: flex;
-            align-items: center;
-            margin-bottom: 30px;
-        }
+// Validate YouTube URL
+function isValidYouTubeURL(url) {
+  const youtubeRegex = /^(https?\:\/\/)?(www\.youtube\.com|youtu\.?be)\/.+$/;
+  return youtubeRegex.test(url);
+}
 
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+// API endpoint for video info
+app.get('/api/info', async (req, res, next) => {
+  try {
+    const videoURL = req.query.url;
+    
+    // Validate URL
+    if (!videoURL) {
+      return res.status(400).json({ error: 'Video URL is required' });
+    }
+    
+    if (!isValidYouTubeURL(videoURL)) {
+      return res.status(400).json({ error: 'Invalid YouTube URL' });
+    }
 
-        .logo-icon {
-            font-size: 2em;
-            color: var(--primary-color);
-        }
+    // Fetch video info with robust error handling
+    const info = await ytdlp(videoURL, {
+      dumpSingleJson: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+      noCheckCertificates: true,
+      noCallHome: true,
+    });
 
-        h1 {
-            font-size: 1.8em;
-            color: var(--secondary-color);
-        }
+    // Validate returned info
+    if (!info || !info.title) {
+      return res.status(404).json({ error: 'Could not retrieve video information' });
+    }
 
-        .converter-form {
-            margin-bottom: 30px;
-        }
+    return res.json({
+      title: info.title || 'Untitled Video',
+      thumbnail: info.thumbnail || '',
+      duration: info.duration || 0,
+      author: info.uploader || 'Unknown'
+    });
+  } catch (error) {
+    console.error('Detailed Error in /api/info:', error);
+    next(error);
+  }
+});
 
-        .form-group {
-            margin-bottom: 20px;
-        }
+// Convert to MP3 (pure MP3 implementation)
+app.get('/api/convert/mp3', async (req, res, next) => {
+  try {
+    const videoURL = req.query.url;
+    const quality = req.query.quality || '128';
+    
+    // Validate URL
+    if (!videoURL) {
+      return res.status(400).json({ error: 'Video URL is required' });
+    }
+    
+    if (!isValidYouTubeURL(videoURL)) {
+      return res.status(400).json({ error: 'Invalid YouTube URL' });
+    }
 
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
+    console.log('Starting MP3 conversion for URL:', videoURL);
 
-        input[type="text"] {
-            width: 100%;
-            padding: 12px;
-            border: 1px solid #ddd;
-            border-radius: var(--border-radius);
-            font-size: 1em;
-        }
+    // Generate a safe filename
+    const info = await ytdlp(videoURL, { dumpSingleJson: true });
+    const safeTitle = info.title.replace(/[^\w\s]/gi, '').replace(/\s+/g, '_');
+    const fileName = `${safeTitle}-${Date.now()}.mp3`;
+    const filePath = path.join(downloadsDir, fileName);
 
-        .format-options {
-            display: flex;
-            gap: 20px;
-            margin-bottom: 20px;
-        }
+    console.log('Will save MP3 to:', filePath);
 
-        .format-option {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-        }
+    // Download audio in a format ffmpeg can handle well
+    const tempFilePath = path.join(downloadsDir, `temp-${Date.now()}.m4a`);
+    
+    console.log('Downloading audio to temp file:', tempFilePath);
+    
+    await ytdlp(videoURL, {
+      output: tempFilePath,
+      extractAudio: true,
+      audioFormat: 'm4a',  // Explicitly use m4a instead of 'best'
+      audioQuality: 0,     // Best quality
+      noCheckCertificates: true,
+      noCallHome: true,
+    });
 
-        .convert-btn {
-            background-color: var(--primary-color);
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: var(--border-radius);
-            cursor: pointer;
-            font-size: 1em;
-            font-weight: bold;
-            transition: background-color 0.3s;
-        }
+    console.log('Audio download complete, converting to MP3');
 
-        .convert-btn:hover {
-            background-color: #cc0000;
-        }
-
-        .video-info {
-            display: none;
-            margin-top: 30px;
-            padding: 20px;
-            background-color: #f9f9f9;
-            border-radius: var(--border-radius);
-            border: 1px solid #ddd;
-        }
-
-        .video-info-content {
-            display: flex;
-            gap: 20px;
-        }
-
-        .video-thumbnail {
-            width: 160px;
-            height: 90px;
-            object-fit: cover;
-        }
-
-        .video-details {
-            flex: 1;
-        }
-
-        .download-btn {
-            display: inline-block;
-            background-color: #4CAF50;
-            color: white;
-            text-decoration: none;
-            padding: 10px 20px;
-            margin-top: 15px;
-            border-radius: var(--border-radius);
-            font-weight: bold;
-        }
-
-        .loader {
-            display: none;
-            text-align: center;
-            margin: 20px 0;
-        }
-
-        .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid var(--primary-color);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .instruction-container {
-            margin-top: 30px;
-            padding: 20px;
-            background-color: #f9f9f9;
-            border-radius: var(--border-radius);
-            border: 1px solid #ddd;
-        }
-
-        .instruction-container h2 {
-            margin-bottom: 15px;
-        }
-
-        .instruction-container ol {
-            padding-left: 20px;
-        }
-
-        .instruction-container li {
-            margin-bottom: 10px;
-        }
-
-        footer {
-            margin-top: 30px;
-            text-align: center;
-            font-size: 0.9em;
-            color: #777;
-        }
-
-        .error-message {
-            display: none;
-            color: red;
-            margin-top: 10px;
-            padding: 10px;
-            background-color: #ffeeee;
-            border-radius: var(--border-radius);
-            border: 1px solid #ffcccc;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <div class="logo">
-                <div class="logo-icon">▶️</div>
-                <h1>YouTube to MP3/MP4 Converter</h1>
-            </div>
-        </header>
-
-        <div class="converter-form">
-            <div class="form-group">
-                <label for="video-url">YouTube Video URL:</label>
-                <input type="text" id="video-url" placeholder="https://www.youtube.com/watch?v=..." required>
-            </div>
-
-            <div class="form-group">
-                <label>Select Format:</label>
-                <div class="format-options">
-                    <div class="format-option">
-                        <input type="radio" id="mp3" name="format" value="mp3" checked>
-                        <label for="mp3">MP3 (Audio)</label>
-                    </div>
-                    <div class="format-option">
-                        <input type="radio" id="mp4" name="format" value="mp4">
-                        <label for="mp4">MP4 (Video)</label>
-                    </div>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label>Quality Options:</label>
-                <div class="format-options" id="quality-options">
-                    <!-- Options will be updated based on format selection -->
-                    <div class="format-option">
-                        <input type="radio" id="quality-128" name="quality" value="128" checked>
-                        <label for="quality-128">128 kbps</label>
-                    </div>
-                    <div class="format-option">
-                        <input type="radio" id="quality-256" name="quality" value="256">
-                        <label for="quality-256">256 kbps</label>
-                    </div>
-                    <div class="format-option">
-                        <input type="radio" id="quality-320" name="quality" value="320">
-                        <label for="quality-320">320 kbps</label>
-                    </div>
-                </div>
-            </div>
-
-            <button class="convert-btn" id="fetch-info-btn">Fetch Video Info</button>
-            <div class="error-message" id="error-message"></div>
-        </div>
-
-        <div class="loader" id="loader">
-            <div class="spinner"></div>
-            <p>Processing your request...</p>
-        </div>
-
-        <div class="video-info" id="video-info">
-            <h3>Video Information</h3>
-            <div class="video-info-content">
-                <img id="video-thumbnail" class="video-thumbnail" src="" alt="Video thumbnail">
-                <div class="video-details">
-                    <p id="video-title"></p>
-                    <p id="video-duration"></p>
-                    <p id="video-author"></p>
-                    <button class="download-btn" id="download-btn">Download</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="instruction-container">
-            <h2>How to Convert YouTube Videos:</h2>
-            <ol>
-                <li>Paste the YouTube video URL in the input field</li>
-                <li>Select your preferred format (MP3 for audio only, MP4 for video)</li>
-                <li>Choose the quality option</li>
-                <li>Click "Fetch Video Info" to verify the video</li>
-                <li>Click "Download" to convert and download the file</li>
-            </ol>
-            <p><strong>Note:</strong> This converter is for personal use only. Please respect copyright laws.</p>
-        </div>
-
-        <footer>
-            <p>© 2025 YouTube Converter | For personal use only</p>
-            <p>Please respect YouTube's Terms of Service and copyright laws.</p>
-        </footer>
-    </div>
-
-    <script>
-        // Update quality options based on format selection
-        document.querySelectorAll('input[name="format"]').forEach(radio => {
-            radio.addEventListener('change', function() {
-                const qualityOptions = document.getElementById('quality-options');
-                const format = this.value;
-                
-                if (format === 'mp3') {
-                    qualityOptions.innerHTML = `
-                        <div class="format-option">
-                            <input type="radio" id="quality-128" name="quality" value="128" checked>
-                            <label for="quality-128">128 kbps</label>
-                        </div>
-                        <div class="format-option">
-                            <input type="radio" id="quality-256" name="quality" value="256">
-                            <label for="quality-256">256 kbps</label>
-                        </div>
-                        <div class="format-option">
-                            <input type="radio" id="quality-320" name="quality" value="320">
-                            <label for="quality-320">320 kbps</label>
-                        </div>
-                    `;
-                } else if (format === 'mp4') {
-                    qualityOptions.innerHTML = `
-                        <div class="format-option">
-                            <input type="radio" id="quality-360" name="quality" value="360" checked>
-                            <label for="quality-360">360p</label>
-                        </div>
-                        <div class="format-option">
-                            <input type="radio" id="quality-480" name="quality" value="480">
-                            <label for="quality-480">480p</label>
-                        </div>
-                        <div class="format-option">
-                            <input type="radio" id="quality-720" name="quality" value="720">
-                            <label for="quality-720">720p HD</label>
-                        </div>
-                        <div class="format-option">
-                            <input type="radio" id="quality-1080" name="quality" value="1080">
-                            <label for="quality-1080">1080p Full HD</label>
-                        </div>
-                    `;
-                }
+    // Convert to pure MP3 with explicit codec settings
+    return new Promise((resolve, reject) => {
+      ffmpeg(tempFilePath)
+        .audioCodec('libmp3lame')           // Explicitly use the MP3 codec
+        .audioBitrate(parseInt(quality))    // Set the requested quality
+        .audioChannels(2)                   // Stereo
+        .audioFrequency(44100)              // CD quality
+        .format('mp3')                      // Ensure MP3 format
+        .outputOptions([
+          '-id3v2_version', '3',            // Add ID3 tags
+          '-write_id3v1', '1'               // Ensure ID3v1 tags are written
+        ])
+        .on('start', (commandLine) => {
+          console.log('FFmpeg started with command:', commandLine);
+        })
+        .on('progress', (progress) => {
+          console.log('FFmpeg progress:', progress.percent, '% done');
+        })
+        .on('error', (err) => {
+          console.error('FFmpeg error:', err);
+          // Clean up temp file
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+          }
+          reject(err);
+        })
+        .on('end', () => {
+          console.log('FFmpeg finished, MP3 conversion complete');
+          
+          // Clean up temp file
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+            console.log('Temp file deleted');
+          }
+          
+          // Verify the file exists and check its format
+          if (fs.existsSync(filePath)) {
+            const stats = fs.statSync(filePath);
+            console.log('MP3 file created, size:', stats.size, 'bytes');
+            
+            // Send the file without deleting it afterward
+            res.download(filePath, fileName, (err) => {
+              if (err) {
+                console.error('Download error:', err);
+                reject(err);
+              } else {
+                console.log('MP3 file download initiated');
+                resolve();
+              }
             });
-        });
+          } else {
+            console.error('MP3 file not found after conversion');
+            reject(new Error('MP3 file not found after conversion'));
+          }
+        })
+        .save(filePath);
+    });
+  } catch (error) {
+    console.error('Detailed Error in /api/convert/mp3:', error);
+    next(error);
+  }
+});
 
-        // Fetch video info
-        document.getElementById('fetch-info-btn').addEventListener('click', async function() {
-            const url = document.getElementById('video-url').value;
-            const errorMessage = document.getElementById('error-message');
-            
-            if (!url) {
-                errorMessage.textContent = 'Please enter a valid YouTube URL';
-                errorMessage.style.display = 'block';
-                return;
-            }
-            
-            // Basic validation
-            if (!url.includes('youtube.com/watch') && !url.includes('youtu.be/')) {
-                errorMessage.textContent = 'Please enter a valid YouTube URL';
-                errorMessage.style.display = 'block';
-                return;
-            }
+// Convert to MP4 - Direct approach
+app.get('/api/convert/mp4', async (req, res, next) => {
+  try {
+    const videoURL = req.query.url;
+    const quality = req.query.quality || '360';
+    
+    // Validate URL
+    if (!videoURL) {
+      return res.status(400).json({ error: 'Video URL is required' });
+    }
+    
+    if (!isValidYouTubeURL(videoURL)) {
+      return res.status(400).json({ error: 'Invalid YouTube URL' });
+    }
 
-            // Hide error message if previously shown
-            errorMessage.style.display = 'none';
-            
-            // Show loader
-            document.getElementById('loader').style.display = 'block';
-            document.getElementById('video-info').style.display = 'none';
-            
-            try {
-                const response = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
-                
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.error || 'Failed to fetch video info');
-                }
-                
-                const data = await response.json();
-                
-                // Update video info section
-                document.getElementById('video-thumbnail').src = data.thumbnail;
-                document.getElementById('video-title').textContent = `Title: ${data.title}`;
-                
-                // Format duration from seconds to MM:SS
-                const minutes = Math.floor(data.duration / 60);
-                const seconds = data.duration % 60;
-                const formattedDuration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-                document.getElementById('video-duration').textContent = `Duration: ${formattedDuration}`;
-                
-                document.getElementById('video-author').textContent = `Channel: ${data.author}`;
-                document.getElementById('loader').style.display = 'none';
-                document.getElementById('video-info').style.display = 'block';
-                
-                // Update download button to use proper endpoint
-                setupDownloadButton(url);
-            } catch (err) {
-                console.error('Error:', err);
-                errorMessage.textContent = err.message || 'Failed to fetch video info';
-                errorMessage.style.display = 'block';
-                document.getElementById('loader').style.display = 'none';
-            }
-        });
+    // Generate a safe filename
+    const info = await ytdlp(videoURL, { dumpSingleJson: true });
+    const safeTitle = info.title.replace(/[^\w\s]/gi, '').replace(/\s+/g, '_');
+    const fileName = `${safeTitle}-${Date.now()}.mp4`;
+    const filePath = path.join(downloadsDir, fileName);
 
-        function setupDownloadButton(videoUrl) {
-            const downloadBtn = document.getElementById('download-btn');
-            
-            downloadBtn.addEventListener('click', function() {
-                const format = document.querySelector('input[name="format"]:checked').value;
-                const quality = document.querySelector('input[name="quality"]:checked').value;
-                
-                // Show loader again
-                document.getElementById('loader').style.display = 'block';
-                
-                // Create download URL
-                const downloadUrl = `/api/convert/${format}?url=${encodeURIComponent(videoUrl)}&quality=${quality}`;
-                
-                // Create an iframe to handle the download
-                const iframe = document.createElement('iframe');
-                iframe.style.display = 'none';
-                iframe.src = downloadUrl;
-                document.body.appendChild(iframe);
-                
-                // Hide loader after a delay (the download should start automatically)
-                setTimeout(() => {
-                    document.getElementById('loader').style.display = 'none';
-                    document.body.removeChild(iframe);
-                }, 2000);
-            });
-        }
-    </script>
-</body>
-</html>
+    // Map quality to format
+    let formatHeight;
+    switch(quality) {
+      case '1080': formatHeight = 1080; break;
+      case '720': formatHeight = 720; break;
+      case '480': formatHeight = 480; break;
+      default: formatHeight = 360; break;
+    }
+
+    console.log('Starting MP4 download to:', filePath);
+
+    // Use yt-dlp directly with the appropriate format and output options
+    await ytdlp(videoURL, {
+      output: filePath,
+      format: `bestvideo[height<=${formatHeight}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${formatHeight}][ext=mp4]`,
+      mergeOutputFormat: 'mp4',
+      addHeader: ['referer:youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36'],
+      noCheckCertificates: true,
+      noCallHome: true,
+      embedMetadata: true,
+      embedThumbnail: false,
+      embedSubs: false,
+    });
+
+    console.log('MP4 download complete, checking file:', filePath);
+    
+    if (!fs.existsSync(filePath)) {
+      console.error('MP4 file does not exist after download');
+      return res.status(500).json({ error: 'MP4 file not found after download' });
+    }
+
+    console.log('MP4 file exists, size:', fs.statSync(filePath).size);
+
+    // Send the file
+    res.download(filePath, fileName, (err) => {
+      if (err) {
+        console.error('MP4 download error:', err);
+      } else {
+        console.log('MP4 file download initiated');
+      }
+    });
+  } catch (error) {
+    console.error('Detailed Error in /api/convert/mp4:', error);
+    next(error);
+  }
+});
+
+// Catch-all route to serve the main page for any undefined routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
